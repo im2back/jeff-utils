@@ -6,7 +6,7 @@ export default function PainelErros({ cfg }) {
   const {
     rodando, apps, appNome, setAppNome, inicioInput, setInicioInput, agoraLocalStr,
     statusTxt, erro, inicioTxt, progresso, estado, expandido, toggleExpandido,
-    carregarApps, iniciar, parar
+    appsMonitoradas, carregandoListaApps, carregarApps, iniciar, parar
   } = usePainel()
 
   useEffect(() => { if (apps.length === 0) carregarApps(cfg) }, [])
@@ -25,19 +25,41 @@ export default function PainelErros({ cfg }) {
 
       <div className="barra-acoes">
         <label className="filtro-inicio">Aplicacao:
-          <select value={appNome} onChange={(e) => setAppNome(e.target.value)} disabled={rodando}>
+          <select value={appNome} onChange={(e) => setAppNome(e.target.value)}>
             {apps.length === 0 && <option value={appNome}>{appNome}</option>}
-            {apps.map((a) => <option key={a.id} value={a.name}>{a.name}</option>)}
+            {apps.map((a) => (
+              <option key={a.id || a.name} value={a.name}>
+                {a.name}{appsMonitoradas.includes(a.name) ? ' (monitorando)' : ''}
+              </option>
+            ))}
           </select>
         </label>
-        <button className="btn small" onClick={() => carregarApps(cfg)} disabled={rodando} title="recarregar lista de apps">recarregar</button>
+        <button
+          className="btn small"
+          onClick={() => carregarApps(cfg)}
+          disabled={carregandoListaApps}
+          title="recarregar lista de apps"
+        >
+          recarregar
+        </button>
+        {carregandoListaApps && (
+          <span
+            className="spinner-recarregar"
+            role="status"
+            aria-label="Carregando lista de aplicacoes"
+            title="carregando lista de aplicacoes"
+          />
+        )}
         <label className="filtro-inicio">A partir de:
           <input type="datetime-local" value={inicioInput} onChange={(e) => setInicioInput(e.target.value)} disabled={rodando} />
         </label>
         <button className="btn small" onClick={() => setInicioInput(agoraLocalStr())} disabled={rodando} title="voltar para agora">agora</button>
         {!rodando && <button className="btn primary" onClick={() => iniciar(cfg)}>Iniciar</button>}
-        {rodando && <button className="btn danger" onClick={parar}>Parar</button>}
+        {rodando && <button className="btn danger" onClick={parar} title="parar somente esta aplicacao">Parar</button>}
         <span className="muted">{statusTxt}{inicioTxt ? ' · desde ' + inicioTxt : ''}</span>
+        {appsMonitoradas.length > 0 && (
+          <span className="muted">{appsMonitoradas.length} monitoramento(s) ativo(s)</span>
+        )}
       </div>
 
       {rodando && (

@@ -189,6 +189,13 @@ body {
 .btn.danger:hover { filter: brightness(1.1); }
 .btn.small { padding: 5px 10px; font-size: 13px; }
 .btn.icone { padding: 4px 10px; }
+.spinner-recarregar {
+  width: 15px; height: 15px; flex: none; border-radius: 50%;
+  border: 2px solid rgba(142, 161, 189, .35);
+  border-top-color: var(--accent);
+  animation: spinner-recarregar-girar .7s linear infinite;
+}
+@keyframes spinner-recarregar-girar { to { transform: rotate(360deg); } }
 
 /* ---- Form extras ---- */
 .linha-input { display: flex; gap: 8px; }
@@ -217,6 +224,16 @@ select.input-filtro { cursor: pointer; }
 .log-ts { color: var(--muted); white-space: nowrap; }
 .log-msg { white-space: pre-wrap; word-break: break-word; flex: 1; }
 .tag-app { white-space: nowrap; align-self: flex-start; }
+.correlation-log-box .log-linha:nth-child(odd) {
+  background: rgba(59, 130, 246, .09);
+  box-shadow: inset 3px 0 rgba(96, 165, 250, .55);
+}
+.correlation-log-box .log-linha:nth-child(even) {
+  background: rgba(245, 158, 11, .07);
+  box-shadow: inset 3px 0 rgba(251, 191, 36, .5);
+}
+.correlation-log-box .log-linha:nth-child(odd):hover { background: rgba(59, 130, 246, .16); }
+.correlation-log-box .log-linha:nth-child(even):hover { background: rgba(245, 158, 11, .14); }
 .log-tail { margin: 0; padding: 12px 16px; white-space: pre-wrap; word-break: break-word; font-family: "Cascadia Code", Consolas, monospace; font-size: 12.5px; color: #cbe0ff; }
 
 /* entradas com tag de nivel (INFO/WARN/ERROR) no monitor de log local */
@@ -300,6 +317,37 @@ select.input-filtro { cursor: pointer; }
 }
 .filtro-inicio select { cursor: pointer; min-width: 220px; }
 .filtro-inicio input:disabled, .filtro-inicio select:disabled { opacity: .6; }
+.correlation-filtros { flex-wrap: wrap; }
+.correlation-input { min-width: 280px; max-width: 420px; }
+.correlation-visualizacao { margin-top: 8px; }
+.api-multi { position: relative; display: flex; align-items: center; gap: 8px; }
+.api-multi-label { color: var(--muted); font-size: 14px; }
+.api-multi-trigger {
+  min-width: 240px; max-width: 360px; display: flex; align-items: center;
+  justify-content: space-between; gap: 14px; padding: 7px 10px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  color: var(--text); font-size: 14px; cursor: pointer; text-align: left;
+}
+.api-multi-trigger span:first-child {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.api-multi-trigger:disabled { cursor: default; opacity: .6; }
+.api-multi-menu {
+  position: absolute; z-index: 20; top: calc(100% + 6px); left: 42px;
+  min-width: 300px; max-width: 440px; max-height: 320px; overflow-y: auto;
+  padding: 6px; border: 1px solid var(--border); border-radius: 9px;
+  background: var(--panel); box-shadow: 0 12px 30px rgba(0, 0, 0, .35);
+}
+.api-multi-opcao {
+  display: flex; align-items: center; gap: 9px; padding: 7px 9px;
+  border-radius: 6px; color: var(--text); font-size: 13px; cursor: pointer;
+}
+.api-multi-opcao:hover { background: var(--panel-2); }
+.api-multi-opcao input { width: 16px; height: 16px; flex: none; accent-color: var(--accent); }
+.api-multi-opcao span { overflow-wrap: anywhere; }
+.api-multi-todas { font-weight: 700; }
+.api-multi-separador { height: 1px; margin: 4px 6px; background: var(--border); }
+.api-multi-vazio { padding: 9px; color: var(--muted); font-size: 13px; }
 
 /* bloco de notas */
 .notas-card { padding: 0; overflow: hidden; }
