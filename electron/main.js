@@ -4,6 +4,8 @@ const path = require('path')
 const fs = require('fs')
 const os = require('os')
 const crypto = require('crypto')
+const http = require('http')
+const https = require('https')
 const { spawn } = require('child_process')
 const AdmZip = require('adm-zip')
 
@@ -102,9 +104,96 @@ ipcMain.handle('logs:fetch', async (_e, { creds, appId, spec }) => {
 })
 
 // ---- Automacao de POST em lote ----
+// Traduz uma falha de rede (fetch rejeitado = sem resposta HTTP) em algo legivel.
+// O fetch do Node quase sempre devolve so "fetch failed"; a causa real vem em err.cause.
+const MOTIVOS_REDE = {
+  CONNECT_TIMEOUT: 'Timeout ao ABRIR a conexao (handshake nao completou no tempo configurado).',
+  RESPONSE_TIMEOUT: 'Conexao aberta, mas o servidor nao devolveu a resposta no tempo configurado.',
+  ECONNRESET: 'Conexao derrubada pelo servidor/rede no meio da requisicao (connection reset).',
+  ECONNREFUSED: 'Conexao recusada: nada escutando nesse host/porta.',
+  ETIMEDOUT: 'Tempo esgotado esperando o servidor (timeout de socket).',
+  UND_ERR_CONNECT_TIMEOUT: 'Timeout ao ABRIR a conexao com o servidor (nao respondeu o handshake a tempo).',
+  UND_ERR_HEADERS_TIMEOUT: 'Servidor aceitou a conexao mas nao enviou os headers de resposta a tempo.',
+  UND_ERR_BODY_TIMEOUT: 'Servidor parou de enviar o corpo da resposta (timeout de body).',
+  UND_ERR_SOCKET: 'Socket fechado inesperadamente (socket hang up).',
+  ENOTFOUND: 'DNS nao resolveu o host (nome invalido ou sem DNS).',
+  EAI_AGAIN: 'Falha temporaria de DNS (rede instavel ou sem internet).',
+  EPIPE: 'Conexao quebrada durante o envio do corpo.',
+  EHOSTUNREACH: 'Host inalcancavel (roteamento/rede).',
+  ENETUNREACH: 'Rede inalcancavel.',
+  EMFILE: 'Muitos arquivos/sockets abertos - reduza a concorrencia.',
+  EADDRNOTAVAIL: 'Sem portas locais disponiveis - reduza a concorrencia (esgotamento de portas efemeras).',
+  CERT_HAS_EXPIRED: 'Certificado TLS do servidor expirado.',
+  DEPTH_ZERO_SELF_SIGNED_CERT: 'Certificado TLS autoassinado/nao confiavel.',
+  UNABLE_TO_VERIFY_LEAF_SIGNATURE: 'Nao foi possivel validar a cadeia do certificado TLS.'
+}
+function detalharFalhaRede(err) {
+  const causa = (err && err.cause) || null
+  const codigo = (causa && (causa.code || causa.name)) || (err && err.code) || (err && err.name) || 'DESCONHECIDO'
+  const msgs = []
+  if (err && err.message) msgs.push(err.message)
+  if (causa && causa.message && causa.message !== (err && err.message)) msgs.push(causa.message)
+  const explicacao = MOTIVOS_REDE[codigo] || 'Falha de rede antes de receber resposta HTTP.'
+  return {
+    erroCodigo: String(codigo),
+    erroMensagem: msgs.join(' | ') || String(err),
+    erroExplicacao: explicacao,
+    payload: 'SEM RESPOSTA HTTP (' + codigo + '): ' + explicacao + ' [detalhe: ' + (msgs.join(' | ') || String(err)) + ']'
+  }
+}
+
+// Envia um POST reaproveitando conexoes (keep-alive) e limitando quantas
+// conexoes sao abertas ao mesmo tempo (maxSockets). Isso evita a rajada de
+// handshakes TLS simultaneos que causava UND_ERR_CONNECT_TIMEOUT.
+function enviarPost(urlStr, headers, body, opts) {
+  const { agent, connectTimeoutMs, respostaTimeoutMs } = opts
+  return new Promise((resolve, reject) => {
+    let u
+    try { u = new URL(urlStr) } catch (err) { return reject(Object.assign(new Error('URL invalida: ' + urlStr), { code: 'URL_INVALIDA' })) }
+    const mod = u.protocol === 'https:' ? https : http
+    const cab = Object.assign({}, headers, { 'Content-Length': Buffer.byteLength(body) })
+
+    const req = mod.request({
+      protocol: u.protocol,
+      hostname: u.hostname,
+      port: u.port || (u.protocol === 'https:' ? 443 : 80),
+      path: u.pathname + u.search,
+      method: 'POST',
+      headers: cab,
+      agent
+    }, (res) => {
+      const chunks = []
+      res.on('data', (c) => chunks.push(c))
+      res.on('end', () => {
+        limpar()
+        resolve({ status: res.statusCode, payload: Buffer.concat(chunks).toString('utf8') })
+      })
+    })
+
+    let conectado = false
+    const tConnect = setTimeout(() => {
+      if (!conectado) req.destroy(Object.assign(new Error('handshake nao completou em ' + connectTimeoutMs + 'ms'), { code: 'CONNECT_TIMEOUT' }))
+    }, connectTimeoutMs)
+    const tResp = setTimeout(() => {
+      req.destroy(Object.assign(new Error('sem resposta em ' + respostaTimeoutMs + 'ms'), { code: 'RESPONSE_TIMEOUT' }))
+    }, respostaTimeoutMs)
+    function limpar() { clearTimeout(tConnect); clearTimeout(tResp) }
+
+    req.on('socket', (socket) => {
+      // socket reaproveitado do pool keep-alive: ja esta pronto
+      if (!socket.connecting) { conectado = true; clearTimeout(tConnect); return }
+      const marcar = () => { conectado = true; clearTimeout(tConnect) }
+      if (u.protocol === 'https:') socket.once('secureConnect', marcar)
+      else socket.once('connect', marcar)
+    })
+    req.on('error', (err) => { limpar(); reject(err) })
+    req.end(body)
+  })
+}
+
 let automacaoCancel = false
 ipcMain.on('automacao:cancel', () => { automacaoCancel = true })
-ipcMain.handle('automacao:run', async (e, { pasta, url, headers, concorrencia, maxPorMinuto, saida }) => {
+ipcMain.handle('automacao:run', async (e, { pasta, url, headers, concorrencia, maxPorMinuto, saida, retentativas, esperaRetryMs, poolConexoes, connectTimeoutSeg }) => {
   automacaoCancel = false
   let files
   try { files = fs.readdirSync(pasta).filter((f) => f.toLowerCase().endsWith('.json')) } catch (err) { return { error: 'Pasta invalida: ' + pasta } }
@@ -112,28 +201,70 @@ ipcMain.handle('automacao:run', async (e, { pasta, url, headers, concorrencia, m
   if (total === 0) return { error: 'Nenhum arquivo .json na pasta.' }
   const conc = concorrencia || 100
   const intervalo = Math.max(1, Math.floor(60000 / (maxPorMinuto || 1000)))
+  // retentativas: SO para falhas de rede (fetch rejeitado). Respostas HTTP (4xx/5xx) nunca sao repetidas.
+  const maxRetry = Math.max(0, retentativas == null ? 2 : Number(retentativas))
+  const baseEspera = Math.max(0, esperaRetryMs == null ? 500 : Number(esperaRetryMs))
+  // pool de conexoes keep-alive: nunca abre mais que N sockets ao mesmo tempo
+  const maxSockets = Math.max(1, Number(poolConexoes) || 6)
+  const connectTimeoutMs = Math.max(500, (Number(connectTimeoutSeg) || 5) * 1000)
+  const respostaTimeoutMs = 120000
+  const ehHttps = String(url).toLowerCase().startsWith('https:')
+  const agent = new (ehHttps ? https.Agent : http.Agent)({
+    keepAlive: true, keepAliveMsecs: 15000, maxSockets, maxFreeSockets: maxSockets, scheduling: 'fifo'
+  })
   const resultados = []
+  let primeiroEnvioMs = null, ultimoEnvioMs = null, ultimaConclusaoMs = null
   let idx = 0, ativos = 0, enviados = 0, concluidos = 0
+  let totalRetentativas = 0, recuperadasNoRetry = 0
 
-  function lancar(arquivo) {
-    ativos++; enviados++
+  const dormir = (ms) => new Promise((r) => setTimeout(r, ms))
+
+  async function lancar(arquivo) {
+    ativos++
     const correlationId = crypto.randomUUID()
     let body
-    try { body = fs.readFileSync(path.join(pasta, arquivo)) } catch (err) { body = Buffer.from('') }
+    try { body = await fs.promises.readFile(path.join(pasta, arquivo)) } catch (err) { body = Buffer.from('') }
     const h = Object.assign({ 'Content-Type': 'application/json', 'X-Correlation-ID': correlationId }, headers || {})
-    fetch(url, { method: 'POST', headers: h, body })
-      .then(async (resp) => {
-        let texto = ''
-        try { texto = await resp.text() } catch (err) {}
-        resultados.push({ arquivo, status: resp.status, payload: texto, correlationId, headers: headers || {} })
-      })
-      .catch((err) => {
-        resultados.push({ arquivo, status: 0, payload: String(err && err.message || err), correlationId, headers: headers || {} })
-      })
-      .finally(() => {
-        ativos--; concluidos++
-        try { e.sender.send('automacao:progress', { enviados, concluidos, total }) } catch (x) {}
-      })
+    const inicioChamadaMs = performance.now()
+    if (primeiroEnvioMs == null) primeiroEnvioMs = inicioChamadaMs
+    ultimoEnvioMs = inicioChamadaMs
+    enviados++
+
+    let resposta = null
+    let tentativas = 0
+    let ultimaFalha = null
+
+    for (let t = 0; t <= maxRetry; t++) {
+      tentativas = t + 1
+      try {
+        const resp = await enviarPost(url, h, body, { agent, connectTimeoutMs, respostaTimeoutMs })
+        // resposta HTTP recebida (mesmo 4xx/5xx) = resultado final, sem retry
+        resposta = { status: resp.status, payload: resp.payload }
+        if (t > 0) recuperadasNoRetry++
+        break
+      } catch (err) {
+        // falha de rede: nao houve resposta HTTP -> elegivel a retry
+        ultimaFalha = detalharFalhaRede(err)
+        if (t < maxRetry && !automacaoCancel) {
+          totalRetentativas++
+          await dormir(baseEspera * Math.pow(2, t)) // backoff: 500ms, 1s, 2s...
+          continue
+        }
+        resposta = {
+          status: 0, payload: ultimaFalha.payload,
+          erroCodigo: ultimaFalha.erroCodigo, erroMensagem: ultimaFalha.erroMensagem,
+          erroExplicacao: ultimaFalha.erroExplicacao
+        }
+      }
+    }
+
+    ultimaConclusaoMs = performance.now()
+    resultados.push({
+      arquivo, ...resposta, correlationId, headers: headers || {},
+      tentativas, duracaoMs: ultimaConclusaoMs - inicioChamadaMs
+    })
+    ativos--; concluidos++
+    try { e.sender.send('automacao:progress', { enviados, concluidos, total, retentativas: totalRetentativas, recuperadas: recuperadasNoRetry }) } catch (x) {}
   }
 
   await new Promise((resolve) => {
@@ -148,22 +279,59 @@ ipcMain.handle('automacao:run', async (e, { pasta, url, headers, concorrencia, m
     }, intervalo)
   })
 
+  try { agent.destroy() } catch (err) {}
+
   // agrupa por status
   const grupos = {}
   for (const r of resultados) { const s = r.status; if (!grupos[s]) grupos[s] = []; grupos[s].push(r) }
   const statusList = Object.keys(grupos).map(Number).sort((a, b) => a - b)
   const resumo = statusList.map((s) => ({ status: s, quantidade: grupos[s].length }))
+
+  // detalhamento das falhas "sem resposta" (status 0), agrupadas pelo motivo real
+  const semResposta = grupos[0] || []
+  const porMotivo = {}
+  for (const r of semResposta) {
+    const cod = r.erroCodigo || 'DESCONHECIDO'
+    if (!porMotivo[cod]) porMotivo[cod] = { codigo: cod, explicacao: r.erroExplicacao || '', quantidade: 0, exemplos: [] }
+    porMotivo[cod].quantidade++
+    if (porMotivo[cod].exemplos.length < 5) porMotivo[cod].exemplos.push({ arquivo: r.arquivo, correlationId: r.correlationId, mensagem: r.erroMensagem })
+  }
+  const diagnosticoSemResposta = Object.values(porMotivo).sort((a, b) => b.quantidade - a.quantidade)
+  const intervaloRealMs = enviados > 1 && ultimoEnvioMs > primeiroEnvioMs
+    ? (ultimoEnvioMs - primeiroEnvioMs) / (enviados - 1)
+    : intervalo
+  const reqPorSegundoEnviados = enviados > 0 ? 1000 / intervaloRealMs : 0
+  const tempoTotalChamadasMs = resultados.reduce((totalMs, r) => totalMs + (r.duracaoMs || 0), 0)
+  const mediaDuracaoChamadasMs = resultados.length > 0 ? tempoTotalChamadasMs / resultados.length : 0
+  const tempoRealExecucaoMs = primeiroEnvioMs != null && ultimaConclusaoMs != null
+    ? ultimaConclusaoMs - primeiroEnvioMs
+    : 0
   const relObj = {
     gerado_em: new Date().toISOString(),
     url,
     interrompido: automacaoCancel,
     total_arquivos_na_pasta: total,
     total_processados: resultados.length,
+    requisicoes_por_segundo_enviadas: reqPorSegundoEnviados,
+    tempo_total_chamadas_ms: tempoTotalChamadasMs,
+    media_duracao_chamadas_ms: mediaDuracaoChamadasMs,
+    tempo_real_execucao_ms: tempoRealExecucaoMs,
     resumo_por_status: resumo,
+    retentativas: {
+      configuradas_por_requisicao: maxRetry,
+      total_de_retentativas: totalRetentativas,
+      recuperadas_no_retry: recuperadasNoRetry,
+      falharam_mesmo_com_retry: (grupos[0] || []).length
+    },
+    diagnostico_sem_resposta: diagnosticoSemResposta,
     resultados: statusList.map((s) => ({
       status: s,
       quantidade: grupos[s].length,
-      respostas: grupos[s].map((r) => ({ arquivo: r.arquivo, correlationId: r.correlationId, headersCustomizados: r.headers, payload: r.payload }))
+      respostas: grupos[s].map((r) => ({
+        arquivo: r.arquivo, correlationId: r.correlationId, headersCustomizados: r.headers, payload: r.payload,
+        tentativas: r.tentativas || 1,
+        ...(r.erroCodigo ? { erroCodigo: r.erroCodigo, erroExplicacao: r.erroExplicacao, erroMensagem: r.erroMensagem } : {})
+      }))
     }))
   }
   let caminhoSaida = null
@@ -174,7 +342,13 @@ ipcMain.handle('automacao:run', async (e, { pasta, url, headers, concorrencia, m
       fs.writeFileSync(caminhoSaida, JSON.stringify(relObj, null, 2), 'utf8')
     } catch (err) { caminhoSaida = null }
   }
-  return { interrompido: automacaoCancel, total, processados: resultados.length, resumo, caminhoSaida, relatorio: relObj }
+  return {
+    interrompido: automacaoCancel, total, processados: resultados.length, resumo,
+    diagnosticoSemResposta,
+    retentativasConfig: maxRetry, totalRetentativas, recuperadasNoRetry,
+    reqPorSegundoEnviados, tempoTotalChamadasMs, mediaDuracaoChamadasMs,
+    tempoRealExecucaoMs, caminhoSaida, relatorio: relObj
+  }
 })
 
 // ---- Relatorios: ler / apagar / limpar pasta ----

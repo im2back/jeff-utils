@@ -364,6 +364,13 @@ select.input-filtro { cursor: pointer; }
   line-height: 1.5; outline: none;
 }
 
+/* diagnostico "sem resposta" */
+.diag-box {
+  margin-top: 16px; padding: 14px 16px;
+  background: rgba(245,158,11,.07); border: 1px solid rgba(245,158,11,.35); border-radius: 10px;
+}
+.diag-titulo { font-weight: 700; color: #fcd34d; margin-bottom: 6px; font-size: 15px; }
+
 /* visualizador do relatorio */
 .grupo-status { border: 1px solid var(--border); border-radius: 10px; margin-bottom: 10px; overflow: hidden; }
 .grupo-head {

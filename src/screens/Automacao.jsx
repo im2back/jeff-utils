@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { useAutomacao } from '../context/AutomacaoContext.jsx'
+import { fmtDur } from '../util/logs.js'
 
 export default function Automacao() {
   const { form, setForm, notas, setNotas, rodando, prog, resultado, erro, iniciar, parar, limpar } = useAutomacao()
@@ -87,6 +88,15 @@ export default function Automacao() {
           <label>Req/min (max)
             <input type="number" value={form.rpm} onChange={(e) => setCampo('rpm', e.target.value)} style={{ width: 90 }} disabled={rodando} />
           </label>
+          <label title="Só re-tenta falhas de REDE (sem resposta). Respostas HTTP 4xx/5xx nunca são repetidas.">Retentativas (rede)
+            <input type="number" min="0" max="5" value={form.retentativas} onChange={(e) => setCampo('retentativas', e.target.value)} style={{ width: 90 }} disabled={rodando} />
+          </label>
+          <label title="Quantas conexões TCP/TLS ficam abertas ao mesmo tempo (keep-alive). Valores baixos evitam rajada de handshakes.">Conexões (pool)
+            <input type="number" min="1" max="64" value={form.pool} onChange={(e) => setCampo('pool', e.target.value)} style={{ width: 90 }} disabled={rodando} />
+          </label>
+          <label title="Tempo máximo para ABRIR a conexão antes de falhar e re-tentar.">Timeout conexão (s)
+            <input type="number" min="1" max="60" value={form.connectTimeout} onChange={(e) => setCampo('connectTimeout', e.target.value)} style={{ width: 90 }} disabled={rodando} />
+          </label>
         </div>
 
         <div className="acoes">
@@ -103,7 +113,12 @@ export default function Automacao() {
       {(rodando || prog.total > 0) && (
         <div className="card">
           <div className="prog-topo">
-            <span>{prog.concluidos} de {prog.total} concluidas ({pct}%)  ·  enviadas: {prog.enviados}{rodando ? '  · rodando em background (pode trocar de aba)' : ''}</span>
+            <span>
+              {prog.concluidos} de {prog.total} concluidas ({pct}%)  ·  enviadas: {prog.enviados}
+              {prog.retentativas > 0 ? '  ·  retentativas: ' + prog.retentativas : ''}
+              {prog.recuperadas > 0 ? '  ·  recuperadas: ' + prog.recuperadas : ''}
+              {rodando ? '  · rodando em background (pode trocar de aba)' : ''}
+            </span>
           </div>
           <div className="barra"><div className="barra-fill" style={{ width: pct + '%' }} /></div>
         </div>
@@ -114,16 +129,55 @@ export default function Automacao() {
           <h3 style={{ marginTop: 0 }}>Relatorio {resultado.interrompido ? '(interrompido)' : ''}</h3>
           <p>Total de arquivos processados: <b>{resultado.processados}</b> de {resultado.total}</p>
           <table className="tabela compacta">
-            <thead><tr><th>Status</th><th>Quantidade</th></tr></thead>
+            <thead><tr><th>Status</th><th>Quantidade</th><th>Req/s enviados</th><th>Tempo total das chamadas</th><th>Média de duração das chamadas</th><th>Tempo real (concorrência)</th></tr></thead>
             <tbody>
-              {resultado.resumo.map((r) => (
+              {resultado.resumo.map((r, i) => (
                 <tr key={r.status}>
                   <td><span className={'badge ' + (r.status >= 200 && r.status < 300 ? 'ok' : 'warn')}>{r.status === 0 ? 'sem resposta' : r.status}</span></td>
                   <td>{r.quantidade}</td>
+                  {i === 0 && <td rowSpan={resultado.resumo.length}>{formatarTaxa(resultado.reqPorSegundoEnviados)}</td>}
+                  {i === 0 && <td rowSpan={resultado.resumo.length}>{formatarTempo(resultado.tempoTotalChamadasMs)}</td>}
+                  {i === 0 && <td rowSpan={resultado.resumo.length}>{formatarTempo(resultado.mediaDuracaoChamadasMs)}</td>}
+                  {i === 0 && <td rowSpan={resultado.resumo.length}>{formatarTempo(resultado.tempoRealExecucaoMs)}</td>}
                 </tr>
               ))}
             </tbody>
           </table>
+
+          {(resultado.totalRetentativas > 0 || resultado.recuperadasNoRetry > 0) && (
+            <p className="muted" style={{ fontSize: 13.5 }}>
+              Retentativas de rede: <b>{resultado.totalRetentativas}</b> ·
+              recuperadas apos retry: <b style={{ color: '#4ade80' }}>{resultado.recuperadasNoRetry}</b> ·
+              limite configurado: {resultado.retentativasConfig} por requisicao
+            </p>
+          )}
+
+          {resultado.diagnosticoSemResposta && resultado.diagnosticoSemResposta.length > 0 && (
+            <div className="diag-box">
+              <div className="diag-titulo">Por que veio "sem resposta"?</div>
+              <p className="muted" style={{ marginTop: 0, fontSize: 13 }}>
+                "Sem resposta" = a requisicao falhou na REDE, antes de o servidor devolver qualquer status HTTP.
+                Nao e erro retornado pela API.
+              </p>
+              <table className="tabela compacta">
+                <thead><tr><th>Motivo</th><th>Qtd</th><th>O que significa</th></tr></thead>
+                <tbody>
+                  {resultado.diagnosticoSemResposta.map((d) => (
+                    <tr key={d.codigo}>
+                      <td className="mono"><span className="badge warn">{d.codigo}</span></td>
+                      <td>{d.quantidade}</td>
+                      <td>{d.explicacao}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="muted" style={{ fontSize: 12.5, marginBottom: 0 }}>
+                Dica: erros como ECONNRESET, UND_ERR_CONNECT_TIMEOUT ou EADDRNOTAVAIL costumam indicar
+                concorrencia alta demais para o servidor/rede. Tente reduzir a Concorrencia (ex.: 100 → 25)
+                e/ou o Req/min.
+              </p>
+            </div>
+          )}
           <div className="acoes">
             <button className="btn primary" onClick={() => setVerRel((v) => !v)}>{verRel ? 'Ocultar relatorio' : 'Ver relatorio na tela'}</button>
             {resultado.caminhoSaida && <button className="btn" onClick={() => window.api.shell.openPath(resultado.caminhoSaida.replace(/[^\\\/]+$/, ''))}>Abrir pasta</button>}
@@ -141,6 +195,17 @@ export default function Automacao() {
       )}
     </div>
   )
+}
+
+function formatarTaxa(valor) {
+  return Number(valor || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+function formatarTempo(ms) {
+  const totalMs = Math.max(0, Number(ms) || 0)
+  if (totalMs < 1000) return Math.round(totalMs) + ' ms'
+  if (totalMs < 60000) return (totalMs / 1000).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' s'
+  return fmtDur(totalMs / 1000)
 }
 
 function GrupoStatus({ g }) {

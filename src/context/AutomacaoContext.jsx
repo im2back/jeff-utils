@@ -3,7 +3,7 @@ import React, { createContext, useContext, useEffect, useRef, useState } from 'r
 const Ctx = createContext(null)
 export function useAutomacao() { return useContext(Ctx) }
 
-const FORM_PADRAO = { pasta: '', saida: '', url: '', headers: [{ nome: '', valor: '' }], conc: 100, rpm: 1000 }
+const FORM_PADRAO = { pasta: '', saida: '', url: '', headers: [{ nome: '', valor: '' }], conc: 100, rpm: 1000, retentativas: 2, pool: 6, connectTimeout: 5 }
 const NOTAS_PADRAO = `#PROCESS-API-3S-SALES
 //https://process-api-3s-sales-g6joro.n5phad.bra-s1.cloudhub.io/api/companies/BurgerKing/sales
 //client_id a07ef5c3-b0b7-4f5b-81c1-da9c03bf2d73
@@ -51,6 +51,9 @@ export function AutomacaoProvider({ children }) {
         pasta: form.pasta, url: form.url, headers: headersObj,
         concorrencia: Number(form.conc) || 100,
         maxPorMinuto: Number(form.rpm) || 1000,
+        retentativas: form.retentativas == null ? 2 : Number(form.retentativas),
+        poolConexoes: Number(form.pool) || 6,
+        connectTimeoutSeg: Number(form.connectTimeout) || 5,
         saida: form.saida || null
       })
       if (r && r.error) setErro(r.error)
